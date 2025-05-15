@@ -1,0 +1,50 @@
+@"
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment
+.env
+secrets/
+*.env
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Python packaging
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Render build folder (if generated)
+render-build/
+
+# Pydantic cache or generated files
+*.json
+
+# Test cache
+.coverage
+.tox/
+.pytest_cache/
+
+# Uvicorn logs
+*.pid
+
+# Misc
+*.db
+"@ | Out-File -Encoding utf8 .gitignore
