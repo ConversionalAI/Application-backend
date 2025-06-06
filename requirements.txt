@@ -1,13 +1,11 @@
 fastapi
 uvicorn
-whisper
+google-cloud-speech
 requests
 bs4
 selenium
 webdriver-manager
 torch
-p
-p
 pydantic
 google-cloud-aiplatform
 google-cloud-secret-manager
