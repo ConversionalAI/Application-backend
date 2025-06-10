@@ -14,3 +14,5 @@ python-dotenv
 httpx
 supabase
 python-multipart
+google-auth
+google-auth-oauthlib

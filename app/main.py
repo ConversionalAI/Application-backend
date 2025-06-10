@@ -13,6 +13,11 @@ import tempfile
 import logging
 import os
 
+from google.oauth2 import service_account
+
+# Optional: Set custom CA bundle path if needed
+# os.environ["GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"] = "/path/to/your/cacert.pem"
+
 # Load environment variables
 load_dotenv()
 
@@ -28,7 +33,7 @@ required_vars = {
     "SUPABASE_URL": SUPABASE_URL,
     "SUPABASE_KEY": SUPABASE_KEY,
     "GOOGLE_SEARCH_API_KEY": API_KEY,
-    "GOOGLE_SEARCH_ENGINE_ID": SEARCH_ENGINE_ID,
+    "SEARCH_ENGINE_ID": SEARCH_ENGINE_ID,
     "GROQ_API_KEY": GROQ_API_KEY,
 }
 for key, value in required_vars.items():
@@ -37,7 +42,8 @@ for key, value in required_vars.items():
 
 # Initialize clients
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-speech_client = speech.SpeechClient()
+credentials = service_account.Credentials.from_service_account_file("credentials.json")
+speech_client = speech.SpeechClient(credentials=credentials)
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # Logging configuration
@@ -65,11 +71,15 @@ class LLMRequest(BaseModel):
 # Routes
 @app.post("/transcribe/")
 async def transcribe_audio(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
+    logging.info("📥 /transcribe/ endpoint hit")
     logging.info(f"📂 Received audio file: {file.filename}")
+    file_location = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
             temp_file.write(await file.read())
             file_location = temp_file.name
+
+        logging.info(f"🌀 Temporary file created at: {file_location}")
 
         with open(file_location, "rb") as audio_file:
             content = audio_file.read()
@@ -81,8 +91,11 @@ async def transcribe_audio(file: UploadFile = File(...), background_tasks: Backg
             language_code="en-US"
         )
 
+        logging.info("🔁 Sending audio to Google Cloud Speech-to-Text API")
         response = speech_client.recognize(config=config, audio=audio)
         transcription_text = " ".join([result.alternatives[0].transcript for result in response.results])
+
+        logging.info("✅ Transcription received from Google Cloud Speech-to-Text API")
 
         if background_tasks:
             background_tasks.add_task(save_transcription, file.filename, transcription_text)
@@ -93,8 +106,9 @@ async def transcribe_audio(file: UploadFile = File(...), background_tasks: Backg
         logging.error(f"❌ Transcription error: {e}")
         raise HTTPException(status_code=500, detail="Transcription failed")
     finally:
-        if os.path.exists(file_location):
+        if file_location and os.path.exists(file_location):
             os.remove(file_location)
+            logging.info(f"🗑️ Temporary file deleted: {file_location}")
 
 def save_transcription(filename, text):
     try:
@@ -105,6 +119,7 @@ def save_transcription(filename, text):
 
 @app.get("/transcriptions")
 async def get_transcriptions():
+    logging.info("📥 /transcriptions endpoint hit")
     try:
         response = (
             supabase
@@ -121,7 +136,7 @@ async def get_transcriptions():
 
 @app.get("/search")
 async def search_google(q: str):
-    logging.info(f"🔍 Searching Google for: {q}")
+    logging.info(f"📥 /search endpoint hit with query: {q}")
     url = "https://www.googleapis.com/customsearch/v1"
     params = {"q": q, "key": API_KEY, "cx": SEARCH_ENGINE_ID, "num": 3}
     response = requests.get(url, params=params)
@@ -136,7 +151,7 @@ async def search_google(q: str):
 
 @app.get("/image-search")
 async def search_images(q: str):
-    logging.info(f"🖼️ Searching for images: {q}")
+    logging.info(f"📥 /image-search endpoint hit with query: {q}")
     url = "https://www.googleapis.com/customsearch/v1"
     params = {
         "q": q,
@@ -169,6 +184,7 @@ async def search_images(q: str):
 
 @app.post("/scrape/")
 async def scrape_web(request: ScrapeRequest):
+    logging.info(f"📥 /scrape/ endpoint hit with pages: {request.pages}")
     results = [scrape_page(url) for url in request.pages]
     return {"scraped_data": results}
 
@@ -185,6 +201,7 @@ def scrape_page(url):
 
 @app.post("/llm/")
 async def query_llm(request: LLMRequest):
+    logging.info(f"📥 /llm/ endpoint hit with prompt: {request.prompt[:100]}...")
     try:
         response = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": request.prompt}],
