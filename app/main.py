@@ -13,22 +13,17 @@ import tempfile
 import logging
 import os
 
-from google.oauth2 import service_account
-
-# Optional: Set custom CA bundle path if needed
-# os.environ["GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"] = "/path/to/your/cacert.pem"
-
-# Load environment variables
+# Load environment variables from .env
 load_dotenv()
 
-# Environment variables
+# Get and validate essential environment variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
 SEARCH_ENGINE_ID = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Validate environment variables
+# Validate all required variables
 required_vars = {
     "SUPABASE_URL": SUPABASE_URL,
     "SUPABASE_KEY": SUPABASE_KEY,
@@ -36,23 +31,21 @@ required_vars = {
     "SEARCH_ENGINE_ID": SEARCH_ENGINE_ID,
     "GROQ_API_KEY": GROQ_API_KEY,
 }
-for key, value in required_vars.items():
-    if not value:
-        raise EnvironmentError(f"❌ {key} is not set in the environment.")
-
-# Initialize clients
+# Force override — always use this value from your .env
+creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+abs_path = os.path.abspath(creds)
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = abs_path
+# Initialize external services
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-credentials = service_account.Credentials.from_service_account_file("credentials.json")
-speech_client = speech.SpeechClient(credentials=credentials)
 groq_client = Groq(api_key=GROQ_API_KEY)
+speech_client = speech.SpeechClient()
 
-# Logging configuration
+# Logger setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# FastAPI app
+# FastAPI app setup
 app = FastAPI()
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -61,42 +54,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Models
+# Pydantic Models
 class ScrapeRequest(BaseModel):
     pages: List[str]
 
 class LLMRequest(BaseModel):
     prompt: str
 
-# Routes
+# Health check
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
+# Transcription
 @app.post("/transcribe/")
 async def transcribe_audio(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     logging.info("📥 /transcribe/ endpoint hit")
-    logging.info(f"📂 Received audio file: {file.filename}")
     file_location = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_file:
             temp_file.write(await file.read())
             file_location = temp_file.name
 
-        logging.info(f"🌀 Temporary file created at: {file_location}")
+        logging.info(f"🌀 Temporary file at: {file_location}")
 
+        # Read audio content
         with open(file_location, "rb") as audio_file:
             content = audio_file.read()
 
+        # Use Google’s WEBM_OPUS encoding with no sample_rate_hertz
         audio = speech.RecognitionAudio(content=content)
         config = speech.RecognitionConfig(
-            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=16000,
+            encoding=speech.RecognitionConfig.AudioEncoding.WEBM_OPUS,
             language_code="en-US"
         )
 
-        logging.info("🔁 Sending audio to Google Cloud Speech-to-Text API")
+        # Transcribe
         response = speech_client.recognize(config=config, audio=audio)
         transcription_text = " ".join([result.alternatives[0].transcript for result in response.results])
+        logging.info("✅ Transcription completed")
 
-        logging.info("✅ Transcription received from Google Cloud Speech-to-Text API")
-
+        # Save to DB in background
         if background_tasks:
             background_tasks.add_task(save_transcription, file.filename, transcription_text)
 
@@ -105,21 +104,24 @@ async def transcribe_audio(file: UploadFile = File(...), background_tasks: Backg
     except Exception as e:
         logging.error(f"❌ Transcription error: {e}")
         raise HTTPException(status_code=500, detail="Transcription failed")
+
     finally:
         if file_location and os.path.exists(file_location):
             os.remove(file_location)
-            logging.info(f"🗑️ Temporary file deleted: {file_location}")
+            logging.info(f"🗑️ Deleted: {file_location}")
 
+
+# Save to Supabase
 def save_transcription(filename, text):
     try:
         supabase.table("transcriptions").insert({"filename": filename, "text": text}).execute()
-        logging.info("✅ Transcription saved to Supabase.")
+        logging.info("✅ Saved to Supabase")
     except Exception as e:
-        logging.error(f"❌ Supabase insertion error: {e}")
+        logging.error(f"❌ Supabase insert error: {e}")
 
+# Get transcriptions
 @app.get("/transcriptions")
 async def get_transcriptions():
-    logging.info("📥 /transcriptions endpoint hit")
     try:
         response = (
             supabase
@@ -132,26 +134,27 @@ async def get_transcriptions():
         return {"transcriptions": response.data}
     except Exception as e:
         logging.error(f"❌ Fetch error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch transcriptions")
+        raise HTTPException(status_code=500, detail="Fetch failed")
 
+# Google text search
 @app.get("/search")
 async def search_google(q: str):
-    logging.info(f"📥 /search endpoint hit with query: {q}")
+    logging.info(f"📥 /search → {q}")
     url = "https://www.googleapis.com/customsearch/v1"
     params = {"q": q, "key": API_KEY, "cx": SEARCH_ENGINE_ID, "num": 3}
     response = requests.get(url, params=params)
 
     if response.status_code != 200:
-        logging.error(f"❌ Google Search API failed: {response.status_code}")
-        return {"error": "Search request failed"}
+        return {"error": "Search failed"}
 
     data = response.json()
-    results = [{"title": item.get("title"), "link": item.get("link"), "snippet": item.get("snippet")} for item in data.get("items", [])]
+    results = [{"title": i["title"], "link": i["link"], "snippet": i["snippet"]} for i in data.get("items", [])]
     return {"results": results}
 
+# Google image search
 @app.get("/image-search")
 async def search_images(q: str):
-    logging.info(f"📥 /image-search endpoint hit with query: {q}")
+    logging.info(f"📥 /image-search → {q}")
     url = "https://www.googleapis.com/customsearch/v1"
     params = {
         "q": q,
@@ -160,14 +163,9 @@ async def search_images(q: str):
         "searchType": "image",
         "num": 5
     }
-
     response = requests.get(url, params=params)
     if response.status_code != 200:
-        logging.error(f"❌ Image Search API failed: {response.status_code}")
-        return JSONResponse(
-            status_code=response.status_code,
-            content={"error": f"Image search failed: {response.status_code}"}
-        )
+        return JSONResponse(status_code=response.status_code, content={"error": "Image search failed"})
 
     data = response.json()
     image_results = [
@@ -179,12 +177,12 @@ async def search_images(q: str):
         }
         for item in data.get("items", [])
     ]
-
     return {"images": image_results}
 
+# Scrape text from webpages
 @app.post("/scrape/")
 async def scrape_web(request: ScrapeRequest):
-    logging.info(f"📥 /scrape/ endpoint hit with pages: {request.pages}")
+    logging.info(f"📥 /scrape/ with pages: {request.pages}")
     results = [scrape_page(url) for url in request.pages]
     return {"scraped_data": results}
 
@@ -196,23 +194,24 @@ def scrape_page(url):
         summary = " ".join([p.text for p in soup.find_all("p")[:5]]) or "No summary available"
         return {"url": url, "summary": summary}
     except requests.exceptions.RequestException as e:
-        logging.error(f"❌ Failed to fetch {url}: {e}")
-        return {"url": url, "error": "Failed to fetch page"}
+        logging.error(f"❌ Scrape failed: {e}")
+        return {"url": url, "error": "Failed to fetch"}
 
+# Query Groq LLM
 @app.post("/llm/")
 async def query_llm(request: LLMRequest):
-    logging.info(f"📥 /llm/ endpoint hit with prompt: {request.prompt[:100]}...")
+    logging.info(f"📥 /llm/ prompt: {request.prompt[:100]}...")
     try:
         response = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": request.prompt}],
-            model="llama-3.3-70b-versatile"
+            model="llama3-70b-8192"
         )
         return {"response": response.choices[0].message.content}
     except Exception as e:
-        logging.error(f"❌ Groq API request failed: {e}")
+        logging.error(f"❌ Groq failed: {e}")
         raise HTTPException(status_code=500, detail=f"Groq request failed: {e}")
 
-# Run the app
+# Local run
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
