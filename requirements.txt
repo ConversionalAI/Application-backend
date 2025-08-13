@@ -21,15 +21,15 @@ supabase==2.18.1
 groq==0.31.0
 
 # ==== Google Cloud APIs ====
-google-cloud-speech==2.26.0
-google-cloud-aiplatform==1.70.0
-google-cloud-secret-manager==2.20.0
-google-auth==2.35.0
-google-auth-oauthlib==1.2.1
+google-cloud-speech
+google-cloud-aiplatform
+google-cloud-secret-manager
+google-auth
+google-auth-oauthlib
 
 # ==== Torch CPU only (no CUDA, much smaller) ====
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.2
 
 # ==== Misc ====
-protobuf==3.17.2
+protobuf>=4.25.0
