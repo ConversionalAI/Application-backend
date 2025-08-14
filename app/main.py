@@ -6,24 +6,25 @@ from typing import List
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from google.cloud import speech
+from google.oauth2 import service_account
 from bs4 import BeautifulSoup
 from groq import Groq
 import requests
 import tempfile
 import logging
 import os
+import json
 
-# Load environment variables from .env
+# Load .env file (local only)
 load_dotenv()
 
-# Get and validate essential environment variables
+# Get required environment variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
 SEARCH_ENGINE_ID = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Validate all required variables
 required_vars = {
     "SUPABASE_URL": SUPABASE_URL,
     "SUPABASE_KEY": SUPABASE_KEY,
@@ -31,19 +32,41 @@ required_vars = {
     "SEARCH_ENGINE_ID": SEARCH_ENGINE_ID,
     "GROQ_API_KEY": GROQ_API_KEY,
 }
-# Force override — always use this value from your .env
-creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-abs_path = os.path.abspath(creds)
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = abs_path
-# Initialize external services
+for key, value in required_vars.items():
+    if not value:
+        raise RuntimeError(f"❌ Missing environment variable: {key}")
+
+# Google credentials handling
+google_creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")  # file path (local)
+google_creds_json = os.getenv("GOOGLE_CREDENTIALS")  # JSON string (Railway)
+
+if google_creds_json:  # Railway style
+    try:
+        creds_info = json.loads(google_creds_json)
+        speech_client = speech.SpeechClient(
+            credentials=service_account.Credentials.from_service_account_info(creds_info)
+        )
+        logging.info("✅ Loaded Google credentials from GOOGLE_CREDENTIALS env var")
+    except json.JSONDecodeError:
+        raise RuntimeError("❌ GOOGLE_CREDENTIALS contains invalid JSON")
+elif google_creds_path:  # Local file path style
+    abs_path = os.path.abspath(os.path.normpath(google_creds_path))
+    if not os.path.exists(abs_path):
+        raise FileNotFoundError(f"❌ Google credentials file not found at: {abs_path}")
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = abs_path
+    speech_client = speech.SpeechClient()
+    logging.info(f"✅ Loaded Google credentials from file: {abs_path}")
+else:
+    raise RuntimeError("❌ No Google Cloud credentials found. Set GOOGLE_CREDENTIALS or GOOGLE_APPLICATION_CREDENTIALS")
+
+# Initialize services
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 groq_client = Groq(api_key=GROQ_API_KEY)
-speech_client = speech.SpeechClient()
 
 # Logger setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# FastAPI app setup
+# FastAPI app
 app = FastAPI()
 
 app.add_middleware(
@@ -54,19 +77,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pydantic Models
+# Pydantic models
 class ScrapeRequest(BaseModel):
     pages: List[str]
 
 class LLMRequest(BaseModel):
     prompt: str
 
-# Health check
 @app.get("/")
 def health():
     return {"status": "ok"}
 
-# Transcription
 @app.post("/transcribe/")
 async def transcribe_audio(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     logging.info("📥 /transcribe/ endpoint hit")
@@ -83,19 +104,16 @@ async def transcribe_audio(file: UploadFile = File(...), background_tasks: Backg
         with open(file_location, "rb") as audio_file:
             content = audio_file.read()
 
-        # Use Google’s WEBM_OPUS encoding with no sample_rate_hertz
         audio = speech.RecognitionAudio(content=content)
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.WEBM_OPUS,
             language_code="en-US"
         )
 
-        # Transcribe
         response = speech_client.recognize(config=config, audio=audio)
         transcription_text = " ".join([result.alternatives[0].transcript for result in response.results])
         logging.info("✅ Transcription completed")
 
-        # Save to DB in background
         if background_tasks:
             background_tasks.add_task(save_transcription, file.filename, transcription_text)
 
@@ -110,8 +128,6 @@ async def transcribe_audio(file: UploadFile = File(...), background_tasks: Backg
             os.remove(file_location)
             logging.info(f"🗑️ Deleted: {file_location}")
 
-
-# Save to Supabase
 def save_transcription(filename, text):
     try:
         supabase.table("transcriptions").insert({"filename": filename, "text": text}).execute()
@@ -119,7 +135,6 @@ def save_transcription(filename, text):
     except Exception as e:
         logging.error(f"❌ Supabase insert error: {e}")
 
-# Get transcriptions
 @app.get("/transcriptions")
 async def get_transcriptions():
     try:
@@ -136,7 +151,6 @@ async def get_transcriptions():
         logging.error(f"❌ Fetch error: {e}")
         raise HTTPException(status_code=500, detail="Fetch failed")
 
-# Google text search
 @app.get("/search")
 async def search_google(q: str):
     logging.info(f"📥 /search → {q}")
@@ -151,7 +165,6 @@ async def search_google(q: str):
     results = [{"title": i["title"], "link": i["link"], "snippet": i["snippet"]} for i in data.get("items", [])]
     return {"results": results}
 
-# Google image search
 @app.get("/image-search")
 async def search_images(q: str):
     logging.info(f"📥 /image-search → {q}")
@@ -179,7 +192,6 @@ async def search_images(q: str):
     ]
     return {"images": image_results}
 
-# Scrape text from webpages
 @app.post("/scrape/")
 async def scrape_web(request: ScrapeRequest):
     logging.info(f"📥 /scrape/ with pages: {request.pages}")
@@ -197,7 +209,6 @@ def scrape_page(url):
         logging.error(f"❌ Scrape failed: {e}")
         return {"url": url, "error": "Failed to fetch"}
 
-# Query Groq LLM
 @app.post("/llm/")
 async def query_llm(request: LLMRequest):
     logging.info(f"📥 /llm/ prompt: {request.prompt[:100]}...")
@@ -211,7 +222,6 @@ async def query_llm(request: LLMRequest):
         logging.error(f"❌ Groq failed: {e}")
         raise HTTPException(status_code=500, detail=f"Groq request failed: {e}")
 
-# Local run
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
