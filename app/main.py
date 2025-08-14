@@ -78,6 +78,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logging.info(f"🚀 Incoming request: {request.method} {request.url}")
+    try:
+        body = await request.body()
+        logging.info(f"📦 Body: {body.decode('utf-8') if body else 'No body'}")
+    except Exception as e:
+        logging.warning(f"Could not read body: {e}")
+
+    try:
+        response = await call_next(request)
+        logging.info(f"✅ Response status: {response.status_code}")
+        return response
+    except Exception as e:
+        logging.error(f"❌ Exception: {e}")
+        logging.error(traceback.format_exc())
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# Example endpoint for debugging
+@app.get("/debug")
+def debug():
+    logging.info("Debug endpoint hit")
+    return {"message": "Backend is working fine"}
+
+
 # Pydantic models
 class ScrapeRequest(BaseModel):
     pages: List[str]
