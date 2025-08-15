@@ -39,11 +39,17 @@ for key, value in required_vars.items():
     if not value:
         raise RuntimeError(f"❌ Missing environment variable: {key}")
 
-# Google credentials handling
-google_creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")  # file path (local)
-google_creds_json = os.getenv("GOOGLE_CREDENTIALS")  # JSON string (Railway)
+import os
+import json
+import logging
+from google.cloud import speech
+from google.oauth2 import service_account
 
-if google_creds_json:  # Railway style
+# Try different credential loading methods
+google_creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")  # local file path
+google_creds_json = os.getenv("GOOGLE_CREDENTIALS")  # JSON string (Railway, local testing)
+
+if google_creds_json:  # JSON in env var
     try:
         creds_info = json.loads(google_creds_json)
         speech_client = speech.SpeechClient(
@@ -52,15 +58,23 @@ if google_creds_json:  # Railway style
         logging.info("✅ Loaded Google credentials from GOOGLE_CREDENTIALS env var")
     except json.JSONDecodeError:
         raise RuntimeError("❌ GOOGLE_CREDENTIALS contains invalid JSON")
-elif google_creds_path:  # Local file path style
+
+elif google_creds_path:  # File path in env var
     abs_path = os.path.abspath(os.path.normpath(google_creds_path))
     if not os.path.exists(abs_path):
         raise FileNotFoundError(f"❌ Google credentials file not found at: {abs_path}")
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = abs_path
     speech_client = speech.SpeechClient()
     logging.info(f"✅ Loaded Google credentials from file: {abs_path}")
+
 else:
-    raise RuntimeError("❌ No Google Cloud credentials found. Set GOOGLE_CREDENTIALS or GOOGLE_APPLICATION_CREDENTIALS")
+    # On Cloud Run / GCP environment — use default service account credentials
+    try:
+        speech_client = speech.SpeechClient()
+        logging.info("✅ Using default Google Cloud credentials from Cloud Run")
+    except Exception as e:
+        raise RuntimeError(f"❌ Could not initialize Google Cloud client: {e}")
+
 
 # Initialize services
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -79,32 +93,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    logging.info(f"🚀 Incoming request: {request.method} {request.url}")
-    try:
-        body = await request.body()
-        logging.info(f"📦 Body: {body.decode('utf-8') if body else 'No body'}")
-    except Exception as e:
-        logging.warning(f"Could not read body: {e}")
-
-    try:
-        response = await call_next(request)
-        logging.info(f"✅ Response status: {response.status_code}")
-        return response
-    except Exception as e:
-        logging.error(f"❌ Exception: {e}")
-        logging.error(traceback.format_exc())
-        from fastapi.responses import JSONResponse
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-# Example endpoint for debugging
-@app.get("/debug")
-def debug():
-    logging.info("Debug endpoint hit")
-    return {"message": "Backend is working fine"}
-
 
 # Pydantic models
 class ScrapeRequest(BaseModel):
